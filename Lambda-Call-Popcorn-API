@@ -1,0 +1,122 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	//"time"
+)
+
+const (
+	BaseURLV1 = "http://popcorn.tbdealing:9006"
+)
+
+type Client struct {
+	BaseURL    string
+	apiKey     string
+	HTTPClient *http.Client
+}
+type AuthenticateResponse struct {
+	AccessToken string `json:"accessToken"`
+}
+
+func NewClient(apiKey string) *Client {
+	return &Client{
+		BaseURL: BaseURLV1,
+		apiKey:  apiKey,
+		HTTPClient: &http.Client{
+			Timeout: time.Hour,
+		},
+	}
+}
+
+func main() {
+	c := NewClient("/g6oDKzUT22kTXB1VesUtS8tHfQxFORFnCF0EW1lBKuDSzDEfLNw+vnWaYBEQr+O")
+
+	ctx := context.TODO()
+	values := map[string]string{"apiId": "0e6e0933-2f9a-4a92-b062-43114c2168db", "apiKey": "aEP01NrbSKC7dfKEqAu1HXkd6XPKDxXbGBw96WLGOVbwGyAQVkCl6fkTQSZRPHZY"}
+	jsonData, err := json.Marshal(values)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/%s", c.BaseURL, "login"), bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req = req.WithContext(ctx)
+	response, err := c.login(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	values = map[string]string{"Invoices": ""}
+	jsonData, err = json.Marshal(values)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req, err = http.NewRequest("POST", fmt.Sprintf("%s/%s", c.BaseURL, "CFCAccountV2-Handler.UpdateDepositRates"), bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req = req.WithContext(ctx)
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "customTranslationsTRUInvoices")
+	req.Header.Set("Authorization", response.AccessToken)
+	req.Header.Set("Accept", "*/*")
+	res, err := c.HTTPClient.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer res.Body.Close()
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusBadRequest {
+		var errRes errorResponse
+		if err = json.NewDecoder(res.Body).Decode(&errRes); err == nil {
+			log.Fatal(errRes.Message)
+		}
+
+		log.Fatal("unknown error, status code: %d", res.StatusCode)
+	}
+}
+
+type errorResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (c *Client) login(req *http.Request) (response *AuthenticateResponse,err error) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "customTranslationsTRUInvoices")
+	req.Header.Set("Accept", "*/*")
+
+	res, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer res.Body.Close()
+
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusBadRequest {
+		var errRes errorResponse
+		if err = json.NewDecoder(res.Body).Decode(&errRes); err == nil {
+			return nil, errors.New(errRes.Message)
+		}
+
+		return nil, fmt.Errorf("unknown error, status code: %d", res.StatusCode)
+	}
+
+	fullResponse := AuthenticateResponse{}
+	if err = json.NewDecoder(res.Body).Decode(&fullResponse); err != nil {
+		return nil, err
+	}
+
+	return &fullResponse, nil
+}
