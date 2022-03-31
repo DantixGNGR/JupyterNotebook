@@ -1,0 +1,103 @@
+import sys
+from pyspark.sql import functions as F
+from pyspark.sql.functions import * 
+from awsglue.job import Job
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from functools import reduce
+from pyspark.sql.types import StringType
+import numpy as np
+import pandas as pd
+#from openpyxl.workbook import Workbook
+sys.argv += ['--JOB_NAME','Custom-Translation-Trucape-Invoices-2']
+sys.argv += ['--source_csv','s3://sol-dev-source/TruCape-Invoices']
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'source_csv'])
+sc = SparkContext.getOrCreate()
+gc = GlueContext(sc)
+spark = gc.spark_session
+job = Job(gc)
+job.init(args["JOB_NAME"])
+# CREATE DYNAMIC FRAME
+source_dyf = gc.create_dynamic_frame.from_options(
+    's3',
+    {
+        "paths": [
+            args["source_csv"]
+        ],
+    },
+    "csv",
+    transformation_ctx = "source_dyf",
+    headerText = True)
+# CONVERT TO SPARK DATAFRAME
+source_df = source_dyf.toDF()
+# CREATE ARRAY WITH DESIRED COLUMNS
+old_columns = source_df.schema.names
+new_columns = [
+    field.lower().replace("col0", "External Reference")
+    .replace("col1", "Number")
+    .replace("col2", "Counterparty")
+    .replace("col3", "Original Amount Due")
+    .replace("col4", "Currency")
+    .replace("col5", "Cost Currency")
+    .replace("col6", "Costing Rate")
+    .replace("col7", "Due Date")
+    .replace("col8", "Issue Date")
+    for field in old_columns
+]
+# OVERWRITE AND PERSIST 'new_columns'
+source_df = reduce(
+    lambda source_df, idx: source_df.withColumnRenamed(old_columns[idx], new_columns[idx]),
+    range(len(old_columns)),
+    source_df,
+)
+# CONVERT TO PANDAS AND REMOVE FIRST ROW
+pandas_source_df = source_df.toPandas()
+source_df = pandas_source_df.iloc[1: , :]
+source_df=spark.createDataFrame(source_df)
+# ADD NOTES & TYPE COLUMN TO DATASET
+source_df = source_df.withColumn('Notes', lit(None).cast(StringType()))
+source_df = source_df.withColumn('Type', F.lit("SalesInvoiceType"))
+# ADD YEAR TO DATE COLUMNS
+due_date="due date"
+issue_date="issue date"
+year = F.lit("-2022")
+due_date_add_year = F.concat(col(due_date),year)
+issue_date_add_year = F.concat(col(issue_date),year)
+source_df = source_df.withColumn(due_date, due_date_add_year) \
+    .withColumn(issue_date, issue_date_add_year)
+# SET DECIMAL PLACES
+costing_rate="costing rate"
+format_costing_rate = format_number(round(costing_rate ,4), 4)
+amount_due="amount due"
+format_amount_due=format_number(round(amount_due ,2), 2)
+source_df = source_df.withColumn(costing_rate, format_costing_rate) \
+# amount due gives null value - not sure why
+# SELECT COLUMNS AND FORMAT DATES
+source_df = source_df.select(
+    col("External Reference"), \
+    col("Number"), \
+    col("Counterparty"), \
+    col("Original Amount Due"), \
+    col("Currency"), \
+    col("Cost Currency"), \
+    col("Costing Rate"), \
+    to_date(F.col("due date"), "d-MMM-yyy").alias("Due Date"), \
+    to_date(F.col("issue date"), "d-MMM-yyy").alias("Issue Date"), \
+     col("Notes"), \
+     col("Type")
+) \
+# REFORMAT DATE COLUMNS TO MATCH TEMPLATE
+source_df = source_df.withColumn("due date", regexp_replace(
+    "due date", "([0-9]{4})-([0-9]{2})-([0-9]{2})", "$1/$2/$3")) \
+    .withColumn("issue date", regexp_replace(
+    "issue date", "([0-9]{4})-([0-9]{2})-([0-9]{2})", "$1/$2/$3"))
+# RENAME DATASET AND WRITE TO OUTPUT LOCATION
+source_df.coalesce(1).write.csv(path='s3://sol-dev-output/TruCape-Invoices', mode='overwrite', header='true')
+myPath = 's3://sol-dev-output/TruCape-Invoices/*'
+hadoopPath = SparkContext._jvm.org.apache.hadoop.fs.Path(myPath)
+hadoopFs = hadoopPath.getFileSystem(SparkContext._jvm.org.apache.hadoop.conf.Configuration())
+statuses = hadoopFs.globStatus(hadoopPath)
+file_name = [file.getPath().getName() for file in statuses if file.getPath().getName().startswith('part-')][0]
+hadoopFs.rename(SparkContext._jvm.org.apache.hadoop.fs.Path(f"s3://sol-dev-output/TruCape-Invoices/{file_name}"), SparkContext._jvm.org.apache.hadoop.fs.Path("s3://sol-dev-output/TruCape-Invoices/TRU_Invoices.csv"))
